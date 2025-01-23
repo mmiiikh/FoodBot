@@ -4,10 +4,14 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from states import Form
 from utils import get_temperature, get_food_info
+from aiogram.fsm.state import State, StatesGroup
 #import aiohttp
 
 router = Router()
 user = {}
+
+class FoodStates(StatesGroup): # Этап, когда пользователь вводит продукт
+    waiting_for_weight = State()
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -77,7 +81,10 @@ async def calculate(message: Message):
     temp = float(get_temperature(city))
     print(f"DEBUG: Данные по подключению к Weather API - результат температура: {temp}")
     # calculate water norm
-    water = float(weight) * 30 + 500 * int(active) / 30 + 500 * temp / 25
+    if temp >= 25.0:
+        water = float(weight) * 30 + 500 * int(active) / 30 + 500 * temp / 25.0
+    else:
+        water = float(weight) * 30 + 500 * int(active) / 30
     user['water_norm'] = water
     # check callories norm
     if callories_aim is None:
@@ -123,14 +130,17 @@ async def cmd_water(
 
     water_diff = water_norm - user['water_log']
     if water_diff >0:
+        user['water_diff'] = water_diff
         await message.answer(f"До выполнения нормы осталось {water_diff} мл")
     else:
+        user['water_diff'] = 0
         await message.answer(f"Норма выполнена!")
 
 #логгируем каллории
 @router.message(Command("log_food"))
 async def cmd_food(
         message: Message,
+        state: FSMContext,
         command: CommandObject
 ):
     global user
@@ -147,9 +157,10 @@ async def cmd_food(
     print(f"DEBUG: Данные по подключению к Food API - result: {callory}")
     user['callory'] = float(callory['calories'])
     await message.answer(f"{food} - {user['callory']} каллорий. Сколько грамм вы съели?")
+    await state.set_state(FoodStates.waiting_for_weight)
 
-@router.message()
-async def log_apifood(message: Message):
+@router.message(FoodStates.waiting_for_weight)
+async def log_apifood(message: Message, state: FSMContext):
     global user
     gram = float(message.text)
     prod_callory = gram/100 * user['callory']
@@ -158,6 +169,7 @@ async def log_apifood(message: Message):
     else:
         user['cal_log'] += prod_callory
     await message.answer(f"Записано {prod_callory} ккал")
+    await state.clear()
 
 #запись тренировки
 @router.message(Command("log_workout"))
@@ -181,14 +193,34 @@ async def cmd_workout(
             "Ошибка: неправильный формат команды. Пример:\n"
             "/log_workout <тип> <время в мин>"
         )
-
+    print(f"DEBUG: после разделения: {work_type} {work_time}")
     weight = float(user['weight'])
     off_call = 6 * float(work_time)/60.0 *  weight
     water_needed = 200 * float(work_time)/30.0
-    user['needed_water'] = water_needed
-    user['off_calories'] = off_call
+    if 'needed_water' and 'off_callories' not in user.keys():
+        user['needed_water'] = water_needed
+        user['off_calories'] = off_call
+    else:
+        user['needed_water'] += water_needed
+        user['off_calories'] += off_call
     await message.answer(f"{work_type} {work_time} минут - {off_call} ккал. \n"
                          f"Дополнительно выпейте {water_needed} мл воды.")
+
+@router.message(Command("check_progress"))
+async def check_progress(message: Message):
+    global user
+    await message.reply(
+        f"Прогресс:\n"
+        f"Вода:\n"
+        f"- Выпито: {user['water_log']} мл. из {user['water_norm']} мл.\n"
+        f"- Осталось: {user['water_diff']} мл.\n"
+        f"- Рекомендованное доп. количество воды: {user['needed_water']} мл.\n"
+        f"\n"
+        f"Калории:\n"
+        f"- Потреблено: {user['cal_log']} ккал. из {user['cal_norm']} ккал.\n"
+        f"- Сожжено: {user['off_calories']} ккал.\n"
+        f"- Баланс: {user['cal_log'] - user['off_calories'] } ккал.\n")
+
 
 # Функция для подключения обработчиков
 def setup_handlers(dp):
